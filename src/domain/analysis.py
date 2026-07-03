@@ -80,6 +80,23 @@ class AnalyzeResult(BaseModel):
     elapsed_ms: int
 
 
+class AskResult(BaseModel):
+    run_id: str
+    dataset_id: str
+    status: str
+    declined: bool
+    message: str | None = None
+    chart: Chart | None = None
+    usage: Usage
+    elapsed_ms: int
+
+
+class ChartTable(BaseModel):
+    chart_id: str
+    columns: list[str]
+    rows: list[list]
+
+
 class ColumnPreview(BaseModel):
     name: str
     dtype: str

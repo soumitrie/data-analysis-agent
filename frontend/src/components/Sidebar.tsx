@@ -37,44 +37,6 @@ export default function Sidebar() {
       className="flex flex-col gap-4"
       data-testid="sidebar-stubs"
     >
-      {/* Ask for a chart — Phase 2 */}
-      <StubPanel title="Ask for a chart" phase="Phase 2">
-        <div className="flex flex-col gap-2">
-          <textarea
-            disabled
-            rows={2}
-            placeholder="Ask in plain English… — Phase 2"
-            className="w-full cursor-not-allowed resize-none rounded-md border border-slate-200 bg-white/60 p-2 text-sm text-slate-400"
-          />
-          <button
-            type="button"
-            disabled
-            className="cursor-not-allowed rounded-md bg-slate-300 px-3 py-1.5 text-sm font-medium text-white"
-          >
-            Ask
-          </button>
-        </div>
-      </StubPanel>
-
-      {/* Cost & tokens — Phase 2 */}
-      <StubPanel title="Cost &amp; tokens" phase="Phase 2">
-        <dl className="space-y-1.5 text-sm text-slate-400">
-          <div className="flex justify-between">
-            <dt>Prompt tokens</dt>
-            <dd>——</dd>
-          </div>
-          <div className="flex justify-between">
-            <dt>Completion tokens</dt>
-            <dd>——</dd>
-          </div>
-          <div className="flex justify-between">
-            <dt>Estimated cost</dt>
-            <dd>——</dd>
-          </div>
-        </dl>
-        <p className="mt-2 text-xs text-slate-400">Token usage &amp; cost — Phase 2</p>
-      </StubPanel>
-
       {/* Export — Phase 4 */}
       <StubPanel title="Export" phase="Phase 4">
         <div className="flex flex-col gap-2">

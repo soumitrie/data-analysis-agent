@@ -96,16 +96,22 @@ class AgentState(TypedDict, total=False):
 **LLM call:** no.
 **Behaviour:** deterministic heuristics assign roles — date (parseable-as-datetime majority or name match), amount (numeric, signed/name match), category (low-cardinality string), counterparty (higher-cardinality string / name match). Builds a human-readable assumption note. Best-guess, never interrogates.
 
-### `plan_charts`
+### `plan_charts` (auto-pack path)
 **Reads:** `profile`, `column_mapping`, `request_text`. **Writes:** `chart_plan`, `usage`, `error`.
 **LLM call:** **yes** — Gemini, system=`prompts/plan_charts.md`, user=`LLMProfile` JSON. Output: structured `chart_plan` JSON.
 **External calls:** Gemini — on failure: retry once, then fall back to default plan (logged) or set `error`.
-**Behaviour:** Gemini picks the most insightful charts (Phase 1: aim for the 3 arsenal-breadth charts) from the whitelist; node validates each spec (known type, referenced roles exist) and drops invalids. Captures token usage.
+**Behaviour:** Gemini picks the most insightful charts (Phase 1: aim for the 3 arsenal-breadth charts) from the whitelist; node validates each spec (known type, referenced roles exist) and drops invalids. Captures token usage. Reached only when `request_text` is absent.
+
+### `plan_from_nl` (Phase-2 NL path)
+**Reads:** `profile`, `column_mapping`, `request_text`, `history`. **Writes:** `chart_plan`, `usage`, `declined`, `message`, `error`.
+**LLM call:** **yes** — Gemini, system=`prompts/plan_from_nl.md`, user = `{profile, column_roles, request, history}` JSON (aggregates + prior-request summaries ONLY — never raw rows).
+**External calls:** Gemini — retry once. Output is ONE chart spec `{ "chart": {…} }` OR `{ "declined": true }`.
+**Behaviour:** maps the plain-English request to EXACTLY ONE parameterized spec (`time_series` with `bucket`/`group_role`/`top_k`/`sign`; `top_n_breakdown` with `group_role`/`top_n`/`metric`/`sign`; `distribution` with `sign`). Every param is validated against the detected roles — invalid/absent roles are dropped or the spec is declined (never guessed). Unlike the auto path there is **NO default-plan fallback**: an unmappable request sets `declined=True` + a friendly `message` and produces no chart (the API returns HTTP 200 with `chart:null`). Only a genuine Gemini transport failure on both attempts sets `error`/`planning_failed` (HTTP 502). Captures token usage. `history` is a short session summary so follow-ups resolve.
 
 ### `compute_figures`
-**Reads:** `dataframe`, `chart_plan`, `column_mapping`. **Writes:** `charts`.
+**Reads:** `dataframe`, `chart_plan`, `column_mapping`, `chart_id_prefix`, `chart_id_start`. **Writes:** `charts`.
 **LLM call:** no.
-**Behaviour:** for each valid spec, pandas computes exact figures over the **full** DataFrame and builds a Plotly figure with the IB house-style template. A per-chart failure drops that chart (partial) and logs; the pack still returns.
+**Behaviour:** for each valid spec, pandas computes exact figures over the **full** DataFrame and builds a Plotly figure with the IB house-style template PLUS the exact aggregated `table` it plotted (bucket-level rows + header labels — figure and table share the same arrays so they can never disagree). Ids are `{prefix}{start+offset}` — `c1..cn` for the auto-pack, `q1,q2,…` for asked charts (session-unique). A per-chart failure drops that chart (partial) and logs; the pack still returns. The runner registers each chart (spec + table) into the session `DatasetStore` so `GET /charts/{cid}/table` serves it for both auto-pack and asked charts.
 
 ### `finalize`
 **Reads:** all. **Writes:** `status`, `elapsed_ms`.
@@ -129,29 +135,30 @@ load_dataset ──(error)──► handle_error ──► END
 profile ──(error)──► handle_error
   │
   ▼
-detect_columns ──(error)──► handle_error
-  │
-  ▼
-plan_charts ──(error)──► handle_error
-  │
-  ▼
-compute_figures ──(error)──► handle_error
-  │
-  ▼
-finalize ──► END
+detect_columns ──(route_request)──► handle_error (error)
+  │                    │
+  │ (request_text)     │ (no request_text)
+  ▼                    ▼
+plan_from_nl        plan_charts
+  │                    │
+  └──────► compute_figures ◄──────┘
+                 │
+                 ▼ (error)──► handle_error
+              finalize ──► END
 ```
 
-**Conditional edges:**
+**Conditional edges (as built in Phase 2):**
 
 | Source node | Condition | Target |
 |-------------|-----------|--------|
 | `load_dataset` | `state.get("error")` | `handle_error` else `profile` |
 | `profile` | `state.get("error")` | `handle_error` else `detect_columns` |
-| `detect_columns` | `state.get("error")` | `handle_error` else `plan_charts` |
+| `detect_columns` | `route_request`: error → `handle_error`; `request_text` set → `plan_from_nl`; else → `plan_charts` |
 | `plan_charts` | `state.get("error")` | `handle_error` else `compute_figures` |
+| `plan_from_nl` | `state.get("error")` | `handle_error` else `compute_figures` (a decline is NOT an error — it flows to compute with an empty plan → completed, `chart:null`) |
 | `compute_figures` | `state.get("error")` | `handle_error` else `finalize` |
 
-*Phase 2:* insert `route_request` after `load_dataset` → branches to `profile` (auto-pack) or `plan_from_nl` (NL request). *Phase 3:* `write_summary` + `data_quality` run after `compute_figures`. *Phase 4:* `anomaly_scan` + `suggest_followups` after compute.
+The Phase-2 `route_request` branch is implemented as a conditional edge out of `detect_columns` (both paths reuse the shared `profile` + `detect_columns`, then split between `plan_charts` and `plan_from_nl`). *Phase 3:* `write_summary` + `data_quality` run after `compute_figures`. *Phase 4:* `anomaly_scan` + `suggest_followups` after compute.
 
 ---
 
@@ -218,26 +225,33 @@ from langgraph.graph import StateGraph, END
 from graph.state import AgentState
 from graph.nodes import (
     load_dataset, profile, detect_columns,
-    plan_charts, compute_figures, finalize, handle_error,
+    plan_charts, plan_from_nl, compute_figures, finalize, handle_error,
 )
-from graph.edges import guard  # guard(next) -> lambda s: "handle_error" if s.get("error") else next
+from graph.edges import guard, route_request  # guard(next); route_request branches by request_text
 
 def _build_graph():
     g = StateGraph(AgentState)
     for name, fn in [
         ("load_dataset", load_dataset), ("profile", profile),
         ("detect_columns", detect_columns), ("plan_charts", plan_charts),
-        ("compute_figures", compute_figures), ("finalize", finalize),
-        ("handle_error", handle_error),
+        ("plan_from_nl", plan_from_nl), ("compute_figures", compute_figures),
+        ("finalize", finalize), ("handle_error", handle_error),
     ]:
         g.add_node(name, fn)
 
     g.set_entry_point("load_dataset")
-    steps = ["load_dataset", "profile", "detect_columns", "plan_charts", "compute_figures"]
-    nexts = ["profile", "detect_columns", "plan_charts", "compute_figures", "finalize"]
-    for src, nxt in zip(steps, nexts):
-        g.add_conditional_edges(src, guard(nxt),
-                                {nxt: nxt, "handle_error": "handle_error"})
+    for src, nxt in [("load_dataset", "profile"), ("profile", "detect_columns")]:
+        g.add_conditional_edges(src, guard(nxt), {nxt: nxt, "handle_error": "handle_error"})
+
+    # Phase-2 branch: auto chart-pack vs NL request.
+    g.add_conditional_edges("detect_columns", route_request,
+                            {"plan_charts": "plan_charts", "plan_from_nl": "plan_from_nl",
+                             "handle_error": "handle_error"})
+    for src in ("plan_charts", "plan_from_nl"):
+        g.add_conditional_edges(src, guard("compute_figures"),
+                                {"compute_figures": "compute_figures", "handle_error": "handle_error"})
+    g.add_conditional_edges("compute_figures", guard("finalize"),
+                            {"finalize": "finalize", "handle_error": "handle_error"})
 
     g.add_edge("finalize", END)
     g.add_edge("handle_error", END)
@@ -245,3 +259,7 @@ def _build_graph():
 
 agentic_ai = _build_graph()
 ```
+
+The NL path is entered via `run_ask(dataset_id, request_text)` (a sibling of
+`run_agent`) which seeds `request_text`, `history` (session summaries), and the asked
+chart-id prefix, then invokes the same compiled graph.

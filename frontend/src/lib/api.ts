@@ -1,4 +1,10 @@
-import type { AnalysisResult, ApiEnvelope, Dataset } from './types'
+import type {
+  AnalysisResult,
+  ApiEnvelope,
+  AskResult,
+  ChartTable,
+  Dataset,
+} from './types'
 
 // Same-origin calls. The app is served under basePath '/app', but the FastAPI
 // routes live at '/api/...' (root), so we use absolute '/api/...' URLs — NOT
@@ -67,6 +73,39 @@ export async function analyzeDataset(datasetId: string): Promise<AnalysisResult>
     body: JSON.stringify({}),
   })
   return parseEnvelope<AnalysisResult>(res)
+}
+
+/**
+ * Ask for a chart in plain English over an already-loaded dataset (Phase 2).
+ * A friendly in-scope decline comes back as a 200 with `declined:true` — NOT an
+ * error — so callers must inspect the result, not just the HTTP status.
+ */
+export async function askDataset(
+  datasetId: string,
+  requestText: string,
+): Promise<AskResult> {
+  const res = await fetch(
+    `${API_BASE}/datasets/${encodeURIComponent(datasetId)}/ask`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_text: requestText }),
+    },
+  )
+  return parseEnvelope<AskResult>(res)
+}
+
+/** Fetch the exact aggregated data table behind a chart (Phase 2). */
+export async function fetchChartTable(
+  datasetId: string,
+  chartId: string,
+): Promise<ChartTable> {
+  const res = await fetch(
+    `${API_BASE}/datasets/${encodeURIComponent(datasetId)}/charts/${encodeURIComponent(
+      chartId,
+    )}/table`,
+  )
+  return parseEnvelope<ChartTable>(res)
 }
 
 /** Human-readable message for a caught error, matching spec/ui.md error states. */

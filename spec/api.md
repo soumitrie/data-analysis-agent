@@ -118,18 +118,110 @@ REST over HTTP, FastAPI, port 8001. Routes registered in `src/api/__init__.py`; 
 
 ---
 
+### `POST /api/datasets/{dataset_id}/ask` — NL chart request (Phase 2)
+
+**Purpose:** map a plain-English request over the already-loaded dataset onto EXACTLY
+ONE parameterized chart spec (Gemini), validated against the whitelist + detected
+roles, then computed locally by pandas over the FULL DataFrame. The new chart is
+appended to the session pack. Prior requests in the session give follow-ups context.
+
+**Privacy:** Gemini receives ONLY the aggregated `LLMProfile`, the detected roles, and
+a SHORT summary of prior requests (their text + resulting chart titles) — never a raw
+transaction row.
+
+**Request body:** `{ "request_text": "monthly total by category" }`
+
+**Response 200:**
+```json
+{
+  "data": {
+    "run_id": "…uuid",
+    "dataset_id": "…uuid",
+    "status": "completed",
+    "declined": false,
+    "message": null,
+    "chart": {
+      "id": "q1",
+      "type": "time_series",
+      "title": "Monthly Total by Category",
+      "subtitle": "Monthly · by category",
+      "figure": { "data": [ ], "layout": { } },
+      "computed_summary": { "total": -10911467.34, "n_buckets": 12, "freq": "ME", "group_by": "category", "series": ["Wire Out", "…"], "sign": "all", "metric": "sum" },
+      "rationale": "Monthly value split across the top categories."
+    },
+    "usage": { "prompt_tokens": 1629, "completion_tokens": 113, "estimated_cost_usd": null },
+    "elapsed_ms": 5200
+  },
+  "error": null
+}
+```
+
+- **Mappable request** → `declined: false`, `message: null`, `chart` = a new `ChartObj`
+  with a session-unique id (asked ids are `q1`, `q2`, …).
+- **Un-mappable request** (Gemini can't map it to the available columns/whitelist, e.g.
+  "tell me a joke") → **still HTTP 200** with `declined: true`, `chart: null`,
+  `message: "Couldn't map that request to the loaded columns — try naming a metric and
+  a grouping, e.g. 'monthly total by category'."`. Never a fabricated chart.
+- `ChartObj` is identical to the analyze charts:
+  `{ id, type, title, subtitle, figure:{data,layout}, computed_summary, rationale }`
+  (the internal aggregated table is served by `/charts/{cid}/table`, not inlined).
+- **NL chart parameters** (chosen by Gemini, validated locally): `time_series` supports
+  `bucket` (`day`/`week`/`month`), an optional `group_role` (`category`/`counterparty`,
+  top-K series via `top_k`) and a `sign` filter (`inflow`/`outflow`/`all`);
+  `top_n_breakdown` supports `group_role`, `top_n`, `metric` (`sum`/`count`/`mean`) and
+  `sign`; `distribution` supports `sign`. Every param is validated against the detected
+  roles — an invalid/absent role is dropped or declined, never guessed.
+
+**Error cases:**
+| Status | Condition |
+|--------|-----------|
+| 400 | `request_text` empty/blank |
+| 404 | `DATASET_NOT_FOUND` — dataset expired/evicted (re-upload) |
+| 502 | `PLANNING_FAILED` — Gemini unreachable after one retry AND no chart produced (a genuine "can't map" is the 200 decline above, not a 502) |
+| 500 | Internal error |
+
+---
+
+### `GET /api/datasets/{dataset_id}/charts/{chart_id}/table` — aggregated data table (Phase 2)
+
+**Purpose:** the exact aggregated data behind a chart (auto-pack OR asked). The rows are
+**bucket-level aggregates ONLY, never raw transactions**, and the numbers EXACTLY equal
+the chart's plotted series (figure and table are built from the same aggregated arrays
+and stored together in the session).
+
+**Response 200:**
+```json
+{
+  "data": {
+    "chart_id": "c2",
+    "columns": ["Counterparty", "Total amount"],
+    "rows": [["Apex Global Markets", -3137823.19], ["Sterling & Rowe", -1505874.47]]
+  },
+  "error": null
+}
+```
+> Table shapes by chart type: `time_series` (ungrouped) → `["Period", "Total amount"]`;
+> `time_series` (grouped) → `["Period", <series…>]` (one value column per series);
+> `top_n_breakdown` → `[<group>, <metric label>]` (ranked, largest first);
+> `distribution` → `["Bin center (amount)", "Transactions"]`.
+
+**Error cases:**
+| Status | Condition |
+|--------|-----------|
+| 404 | `CHART_NOT_FOUND` — the dataset or chart id is not in the session store |
+
+---
+
 ### `GET /health` — liveness (existing skeleton endpoint, unchanged)
 
 **Response 200:** `{ "data": { "status": "ok" }, "error": null }`
 
 ---
 
-## Deferred endpoints (Phase 2+ — not built in Phase 1)
+## Deferred endpoints (Phase 3+ — not built yet)
 
 | Endpoint | Phase | Purpose |
 |----------|-------|---------|
-| `POST /api/datasets/{id}/ask` | 2 | NL chart request over the loaded dataset |
-| `GET /api/datasets/{id}/charts/{cid}/table` | 2 | Aggregated data table behind a chart |
 | `GET /api/datasets/{id}/charts/{cid}/export?format=png\|svg` | 4 | Static publication image |
 | `GET /api/datasets/{id}/export` | 4 | Full-pack bundle |
 | `GET /api/runs` / `GET /api/runs/{id}` | 4 | History list + reopen a past analysis |

@@ -83,3 +83,25 @@ export interface AnalysisResult {
   usage?: Usage | null
   elapsed_ms?: number | null
 }
+
+// Phase 2 — NL chart request over an already-loaded dataset.
+// POST /api/datasets/{id}/ask  body { request_text }
+export interface AskResult {
+  run_id: string
+  dataset_id: string
+  status: string
+  // A friendly, in-scope decline returns declined:true + a message and no chart.
+  declined: boolean
+  message: string | null
+  chart: ChartSpec | null
+  usage?: Usage | null
+  elapsed_ms?: number | null
+}
+
+// Phase 2 — aggregated data table behind a chart.
+// GET /api/datasets/{id}/charts/{chartId}/table
+export interface ChartTable {
+  chart_id: string
+  columns: string[]
+  rows: (string | number)[][]
+}

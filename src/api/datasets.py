@@ -10,11 +10,12 @@ import io
 import pandas as pd
 from fastapi import APIRouter, UploadFile, File
 from pandas.api import types as pdt
+from pydantic import BaseModel
 
 from api._common import ok, api_error
 from analysis.store import get_store, RowCapExceeded, MAX_ROWS
-from domain.analysis import AnalyzeResult, UploadResult
-from graph.runner import run_agent
+from domain.analysis import AnalyzeResult, AskResult, ChartTable, UploadResult
+from graph.runner import run_agent, run_ask
 from observability.events import get_logger
 
 router = APIRouter(prefix="/api")
@@ -116,5 +117,62 @@ def analyze_dataset(dataset_id: str) -> dict:
         charts=len(result.get("charts", [])),
         status=result["status"],
         elapsed_ms=result.get("elapsed_ms"),
+    )
+    return ok(payload.model_dump())
+
+
+class AskRequest(BaseModel):
+    request_text: str
+
+
+@router.post("/datasets/{dataset_id}/ask")
+def ask_dataset(dataset_id: str, body: AskRequest) -> dict:
+    request_text = (body.request_text or "").strip()
+    if not request_text:
+        raise api_error("EMPTY_REQUEST", "The request text is empty.", 400)
+
+    if get_store().get(dataset_id) is None:
+        raise api_error(
+            "DATASET_NOT_FOUND",
+            "Dataset is not in memory (expired or evicted). Please re-upload.",
+            404,
+        )
+
+    result = run_ask(dataset_id, request_text)
+
+    if result.get("status") != "completed":
+        code = result.get("error_code", "internal")
+        status = _ERROR_STATUS.get(code, 500)
+        raise api_error(code.upper(), result.get("error", "Ask failed."), status)
+
+    payload = AskResult(**result)
+    log.info(
+        "ask",
+        dataset_id=dataset_id,
+        run_id=result["run_id"],
+        declined=result.get("declined"),
+        has_chart=result.get("chart") is not None,
+        elapsed_ms=result.get("elapsed_ms"),
+    )
+    return ok(payload.model_dump())
+
+
+@router.get("/datasets/{dataset_id}/charts/{chart_id}/table")
+def chart_table(dataset_id: str, chart_id: str) -> dict:
+    chart = get_store().get_chart(dataset_id, chart_id)
+    if chart is None:
+        raise api_error(
+            "CHART_NOT_FOUND",
+            "That chart is not in the session (dataset expired/evicted or unknown chart). Please re-analyze.",
+            404,
+        )
+    table = chart.get("table") or {"columns": [], "rows": []}
+    payload = ChartTable(chart_id=chart_id, columns=table["columns"], rows=table["rows"])
+    log.info(
+        "chart_table",
+        dataset_id=dataset_id,
+        chart_id=chart_id,
+        columns=len(table["columns"]),
+        rows=len(table["rows"]),
     )
     return ok(payload.model_dump())

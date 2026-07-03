@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from 'react'
 import { analyzeDataset, messageForError, uploadDataset } from '@/lib/api'
-import type { AnalysisResult, Dataset } from '@/lib/types'
+import type { AnalysisResult, ChartSpec, Dataset, Usage } from '@/lib/types'
 import Header from '@/components/Header'
 import UploadZone from '@/components/UploadZone'
 import ProgressSpinner from '@/components/ProgressSpinner'
@@ -11,6 +11,8 @@ import ChartCard from '@/components/ChartCard'
 import ChartSkeleton from '@/components/ChartSkeleton'
 import ErrorCallout from '@/components/ErrorCallout'
 import Sidebar from '@/components/Sidebar'
+import AskBox from '@/components/AskBox'
+import CostPanel from '@/components/CostPanel'
 
 type Phase = 'idle' | 'uploading' | 'analyzing' | 'done' | 'error'
 
@@ -18,15 +20,19 @@ export default function Home() {
   const [phase, setPhase] = useState<Phase>('idle')
   const [dataset, setDataset] = useState<Dataset | null>(null)
   const [result, setResult] = useState<AnalysisResult | null>(null)
+  const [askedCharts, setAskedCharts] = useState<ChartSpec[]>([])
+  const [usage, setUsage] = useState<Usage | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const runAnalyze = useCallback(async (datasetId: string) => {
     setPhase('analyzing')
     setError(null)
     setResult(null)
+    setAskedCharts([])
     try {
       const analysis = await analyzeDataset(datasetId)
       setResult(analysis)
+      setUsage(analysis.usage ?? null)
       setPhase('done')
     } catch (err) {
       setError(messageForError(err))
@@ -40,6 +46,8 @@ export default function Home() {
       setError(null)
       setResult(null)
       setDataset(null)
+      setAskedCharts([])
+      setUsage(null)
       try {
         const uploaded = await uploadDataset(file)
         setDataset(uploaded)
@@ -53,9 +61,21 @@ export default function Home() {
     [runAnalyze],
   )
 
+  // Append a chart returned by the Ask box to the pack (below the auto-pack).
+  const handleAskedChart = useCallback((chart: ChartSpec) => {
+    setAskedCharts((prev) => [...prev, chart])
+  }, [])
+
+  const handleUsage = useCallback((next: Usage | null | undefined) => {
+    if (next) setUsage(next)
+  }, [])
+
   const busy = phase === 'uploading' || phase === 'analyzing'
   const showSkeletons = phase === 'analyzing' || phase === 'uploading'
-  const charts = result?.charts ?? []
+  const autoCharts = result?.charts ?? []
+  const datasetId = dataset?.dataset_id ?? ''
+  // The Ask box is only live once the auto-pack analysis has completed.
+  const askReady = phase === 'done' ? dataset : null
 
   return (
     <div className="min-h-screen bg-slate-100">
@@ -91,10 +111,13 @@ export default function Home() {
               </div>
             )}
 
-            {phase === 'done' && charts.length > 0 && (
+            {phase === 'done' && (autoCharts.length > 0 || askedCharts.length > 0) && (
               <section aria-label="Chart pack" className="flex flex-col gap-6">
-                {charts.map((chart) => (
-                  <ChartCard key={chart.id} chart={chart} />
+                {autoCharts.map((chart) => (
+                  <ChartCard key={chart.id} chart={chart} datasetId={datasetId} />
+                ))}
+                {askedCharts.map((chart) => (
+                  <ChartCard key={chart.id} chart={chart} datasetId={datasetId} />
                 ))}
               </section>
             )}
@@ -113,7 +136,7 @@ export default function Home() {
               </div>
             )}
 
-            {phase === 'done' && charts.length === 0 && (
+            {phase === 'done' && autoCharts.length === 0 && askedCharts.length === 0 && (
               <div className="rounded-xl border border-slate-200 bg-white p-8 text-center shadow-sm">
                 <p className="text-sm text-slate-500">
                   No charts were returned for this dataset.
@@ -122,8 +145,16 @@ export default function Home() {
             )}
           </div>
 
-          {/* Right sidebar (labelled stubs) */}
-          <Sidebar />
+          {/* Right sidebar: real Ask + Cost controls, then labelled stubs. */}
+          <div className="flex flex-col gap-4">
+            <AskBox
+              dataset={askReady}
+              onChart={handleAskedChart}
+              onUsage={handleUsage}
+            />
+            <CostPanel usage={usage} />
+            <Sidebar />
+          </div>
         </div>
       </main>
     </div>
