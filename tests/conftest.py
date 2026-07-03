@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 
@@ -26,6 +28,15 @@ def _isolated_db(tmp_path, monkeypatch):
     engine.dispose()
 
 
+@pytest.fixture(autouse=True)
+def _reset_dataset_store():
+    """The DatasetStore is a process-local singleton — reset it between tests."""
+    import analysis.store as store_module
+    store_module._store = None
+    yield
+    store_module._store = None
+
+
 @pytest.fixture
 def _require_llm_key():
     """Skip if no LLM provider key is set — works for Anthropic or Gemini."""
@@ -33,6 +44,20 @@ def _require_llm_key():
     s = get_settings()
     if not s.anthropic_api_key and not s.gemini_api_key:
         pytest.skip("No LLM key set in .env (AGENT_ANTHROPIC_API_KEY or AGENT_GEMINI_API_KEY)")
+
+
+SAMPLE_CSV = Path(__file__).resolve().parent.parent / "samples" / "transactions_sample.csv"
+
+
+@pytest.fixture
+def sample_csv_path() -> Path:
+    return SAMPLE_CSV
+
+
+@pytest.fixture
+def sample_df():
+    import pandas as pd
+    return pd.read_csv(SAMPLE_CSV)
 
 
 @pytest.fixture

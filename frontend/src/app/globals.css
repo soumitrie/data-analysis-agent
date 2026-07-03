@@ -1,2 +1,36 @@
 @import "tailwindcss";
 @source "../";
+
+/* IB house-style design tokens — must match the server-side Plotly template. */
+@theme {
+  --font-sans: var(--font-inter), "Helvetica Neue", Helvetica, Arial, sans-serif;
+
+  --color-navy-950: #10192b;
+  --color-navy-900: #1b2a41;
+  --color-navy-800: #223550;
+  --color-navy-700: #2c435f;
+
+  --color-accent-600: #2e6e8e;
+  --color-accent-500: #3a83a6;
+  --color-accent-400: #4f9cbf;
+}
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  font-family: var(--font-sans);
+}
+
+/* Reduced-motion respect for the staged spinner / skeletons. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

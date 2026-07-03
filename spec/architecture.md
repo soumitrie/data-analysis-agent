@@ -73,7 +73,7 @@ SQLite (AnalysisRun: mapping, plan, tokens)  Plotly figure JSON → Browser rend
 
 - **Language:** Python 3.12+ (backend), TypeScript (frontend).
 - **Agent framework:** LangGraph (already wired in the skeleton).
-- **LLM provider + model:** **Google Gemini**, via `AGENT_GEMINI_API_KEY`. Provider auto-detected by `src/config/settings.py` (`llm_provider` blank → Gemini when the Gemini key is set). Default model `gemini-3.1-pro`, configurable via `AGENT_LLM_MODEL`. The skeleton ships `src/llm/providers/gemini.py`. **No Anthropic** in this project.
+- **LLM provider + model:** **Google Gemini**, via `AGENT_GEMINI_API_KEY`. Provider auto-detected by `src/config/settings.py` (`llm_provider` blank → Gemini when the Gemini key is set). Default model `gemini-3.1-pro-preview` (the working preview alias of the nominal 3.1-pro; the bare `gemini-3.1-pro` id 404s on the live API), configurable via `AGENT_LLM_MODEL`. The skeleton ships `src/llm/providers/gemini.py`. **No Anthropic** in this project.
 - **Backend:** FastAPI, served by uvicorn on port 8001; single-origin static-serves the frontend at `/app`.
 - **Database + ORM:** SQLite (`sqlite:///./data/agent.db`) + SQLAlchemy 2.0. Schema created via `Base.metadata.create_all` in `init_db()` — **no Alembic** (skeleton convention; SQLite single-user tool). SQLite is the production driver, so tests run on SQLite (production-equivalent per the test-environment rule).
 - **Frontend:** Next.js 15 + React 19, static export (`output: 'export'`, `basePath: '/app'`), Tailwind v4, Plotly for interactive charts.

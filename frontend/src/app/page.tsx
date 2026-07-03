@@ -1,77 +1,131 @@
 'use client'
 
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
+import { analyzeDataset, messageForError, uploadDataset } from '@/lib/api'
+import type { AnalysisResult, Dataset } from '@/lib/types'
+import Header from '@/components/Header'
+import UploadZone from '@/components/UploadZone'
+import ProgressSpinner from '@/components/ProgressSpinner'
+import MappingPanel from '@/components/MappingPanel'
+import ChartCard from '@/components/ChartCard'
+import ChartSkeleton from '@/components/ChartSkeleton'
+import ErrorCallout from '@/components/ErrorCallout'
+import Sidebar from '@/components/Sidebar'
+
+type Phase = 'idle' | 'uploading' | 'analyzing' | 'done' | 'error'
 
 export default function Home() {
-  const [input, setInput] = useState('')
-  const [result, setResult] = useState<string | null>(null)
+  const [phase, setPhase] = useState<Phase>('idle')
+  const [dataset, setDataset] = useState<Dataset | null>(null)
+  const [result, setResult] = useState<AnalysisResult | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!input.trim()) return
-    setLoading(true)
+  const runAnalyze = useCallback(async (datasetId: string) => {
+    setPhase('analyzing')
     setError(null)
     setResult(null)
     try {
-      const res = await fetch('/runs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input_text: input }),
-      })
-      const data = await res.json()
-      if (!res.ok) {
-        setError(data.detail?.message ?? `Request failed (${res.status})`)
-      } else if (data.data?.error) {
-        setError(data.data.error)
-      } else {
-        setResult(data.data.output_text)
-      }
-    } catch {
-      setError('Network error — is the server running?')
-    } finally {
-      setLoading(false)
+      const analysis = await analyzeDataset(datasetId)
+      setResult(analysis)
+      setPhase('done')
+    } catch (err) {
+      setError(messageForError(err))
+      setPhase('error')
     }
-  }
+  }, [])
+
+  const handleFile = useCallback(
+    async (file: File) => {
+      setPhase('uploading')
+      setError(null)
+      setResult(null)
+      setDataset(null)
+      try {
+        const uploaded = await uploadDataset(file)
+        setDataset(uploaded)
+        // Auto-fire the analysis as soon as the upload lands.
+        await runAnalyze(uploaded.dataset_id)
+      } catch (err) {
+        setError(messageForError(err))
+        setPhase('error')
+      }
+    },
+    [runAnalyze],
+  )
+
+  const busy = phase === 'uploading' || phase === 'analyzing'
+  const showSkeletons = phase === 'analyzing' || phase === 'uploading'
+  const charts = result?.charts ?? []
 
   return (
-    <main className="mx-auto max-w-2xl px-4 py-16">
-      <h1 className="mb-8 text-3xl font-bold tracking-tight">Agent</h1>
+    <div className="min-h-screen bg-slate-100">
+      <Header />
 
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <textarea
-          className="w-full rounded-lg border border-gray-300 p-3 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          rows={4}
-          placeholder="Enter text to transform…"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          disabled={loading}
-        />
-        <button
-          type="submit"
-          disabled={loading || !input.trim()}
-          className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-        >
-          {loading ? 'Running…' : 'Run'}
-        </button>
-      </form>
+      <main className="mx-auto max-w-6xl px-6 py-8">
+        <div className="grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_320px]">
+          {/* Main column */}
+          <div className="flex min-w-0 flex-col gap-6">
+            <UploadZone dataset={dataset} busy={busy} onFile={handleFile} />
 
-      {error && (
-        <div className="mt-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          {error}
+            {phase === 'error' && error && (
+              <ErrorCallout
+                message={error}
+                onRetry={
+                  dataset ? () => void runAnalyze(dataset.dataset_id) : undefined
+                }
+              />
+            )}
+
+            {busy && <ProgressSpinner />}
+
+            {result?.column_mapping && phase === 'done' && (
+              <MappingPanel mapping={result.column_mapping} />
+            )}
+
+            {/* Chart pack */}
+            {showSkeletons && (
+              <div className="flex flex-col gap-6" aria-hidden="true">
+                <ChartSkeleton />
+                <ChartSkeleton />
+                <ChartSkeleton />
+              </div>
+            )}
+
+            {phase === 'done' && charts.length > 0 && (
+              <section aria-label="Chart pack" className="flex flex-col gap-6">
+                {charts.map((chart) => (
+                  <ChartCard key={chart.id} chart={chart} />
+                ))}
+              </section>
+            )}
+
+            {/* Empty / idle state */}
+            {phase === 'idle' && (
+              <div className="rounded-xl border border-slate-200 bg-white p-10 text-center shadow-sm">
+                <p className="text-base font-semibold text-navy-900">
+                  Upload a transaction CSV to begin
+                </p>
+                <p className="mx-auto mt-2 max-w-md text-sm text-slate-500">
+                  Ledger Lens auto-detects your columns and builds a publication-grade,
+                  investment-banking-style chart pack — every figure computed locally over the
+                  full dataset, nothing sampled.
+                </p>
+              </div>
+            )}
+
+            {phase === 'done' && charts.length === 0 && (
+              <div className="rounded-xl border border-slate-200 bg-white p-8 text-center shadow-sm">
+                <p className="text-sm text-slate-500">
+                  No charts were returned for this dataset.
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Right sidebar (labelled stubs) */}
+          <Sidebar />
         </div>
-      )}
-
-      {result && (
-        <div className="mt-6 rounded-lg border border-gray-200 bg-white p-4 text-sm whitespace-pre-wrap shadow-sm">
-          {result}
-        </div>
-      )}
-
-      {!result && !error && !loading && (
-        <p className="mt-10 text-center text-sm text-gray-400">Results will appear here.</p>
-      )}
-    </main>
+      </main>
+    </div>
   )
 }

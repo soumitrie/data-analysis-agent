@@ -46,6 +46,19 @@ def create_db_session() -> Generator[Session, None, None]:
             raise
 
 
+def _ensure_sqlite_dir() -> None:
+    from pathlib import Path
+    from config.settings import get_settings
+
+    url = get_settings().database_url
+    prefix = "sqlite:///"
+    if url.startswith(prefix):
+        path = url[len(prefix):]
+        if path and path != ":memory:":
+            Path(path).resolve().parent.mkdir(parents=True, exist_ok=True)
+
+
 def init_db() -> None:
     from db.models import Base
+    _ensure_sqlite_dir()
     Base.metadata.create_all(bind=_get_engine())

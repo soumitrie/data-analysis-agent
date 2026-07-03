@@ -22,8 +22,8 @@ Required: this project uses LangGraph. This file is the source of truth for the 
 
 | Agent / Node | Provider | Model ID | Rationale |
 |-------------|----------|----------|-----------|
-| `plan_charts` | Google Gemini | `gemini-3.1-pro` (default; `AGENT_LLM_MODEL` override) | Chart selection needs strong reasoning over the profile; one call, well within the 30s budget. Quality over latency. |
-| `write_summary` *(Phase 3)* | Google Gemini | `gemini-3.1-pro` | Executive narrative quality matters. |
+| `plan_charts` | Google Gemini | `gemini-3.1-pro-preview` (default; `AGENT_LLM_MODEL` override) | Chart selection needs strong reasoning over the profile; one call, well within the 30s budget. Quality over latency. |
+| `write_summary` *(Phase 3)* | Google Gemini | `gemini-3.1-pro-preview` | Executive narrative quality matters. |
 | `suggest_followups` *(Phase 4)* | Google Gemini | `gemini-2.5-flash` | Short suggestions — latency-sensitive, cheaper model. |
 
 Provider is resolved by `src/llm/client.py` auto-detect (Gemini key set → Gemini). **No Anthropic.**
