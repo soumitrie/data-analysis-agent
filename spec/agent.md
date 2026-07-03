@@ -1,218 +1,265 @@
-# Agent
+# Agent — Ledger Lens
 
-> Required when the project uses an agent framework. Delete this file if your project has no agent framework.
->
-> If your project has no agent framework (e.g., a simple script or single-LLM API call), delete this file.
->
+Required: this project uses LangGraph. This file is the source of truth for the agent graph.
 
 ---
 
 ## Agent Architecture Pattern
 
-<!-- FILL IN: Which pattern does this agent follow? Choose one and describe why. -->
-
 | Pattern | Use when |
 |---------|----------|
-| **Single-agent loop** | One LLM drives a deterministic tool-call loop. No branches, no handoffs. |
-| **Graph (LangGraph)** | Multi-step pipeline with conditional edges, checkpointing, or parallel nodes. |
-| **Multi-agent** | Specialised sub-agents with distinct roles; orchestrator routes between them. |
-| **Supervisor** | One supervisor LLM dispatches to worker agents based on task type. |
-| **Human-in-the-loop** | Execution pauses at defined checkpoints for user review or approval. |
+| **Single-agent loop** | One LLM drives a deterministic tool-call loop. |
+| **Graph (LangGraph)** | Multi-step pipeline with conditional edges. |
+| **Multi-agent** | Specialised sub-agents with an orchestrator. |
+| **Supervisor** | One supervisor dispatches to workers. |
+| **Human-in-the-loop** | Pauses for user review. |
 
-**Chosen:** <!-- state pattern + one-sentence rationale -->
+**Chosen:** **Graph (LangGraph)** — a fixed, mostly-linear pipeline (`load_dataset → profile → detect_columns → plan_charts → compute_figures → finalize`) with a single conditional error edge. A single LLM call (`plan_charts`) selects charts; all computation is deterministic. No loop, no multi-agent, no HITL is needed for Phase 1. Phase 2 adds one conditional branch (`route_request`: auto-pack vs NL request); Phase 3/4 add sibling nodes (`write_summary`, `data_quality`, `anomaly_scan`, `suggest_followups`). **The base graph is sufficient — no patterns beyond the base pipeline are required, so no separate "Agentic Stack Upgrade" phase is planned.**
 
 ---
 
 ## LLM Provider & Model
 
-<!-- FILL IN: Which model drives each agent/node? State provider, model ID, and why. -->
-
 | Agent / Node | Provider | Model ID | Rationale |
 |-------------|----------|----------|-----------|
-| <!-- node --> | Anthropic | <!-- e.g. claude-sonnet-4-6 --> | <!-- latency vs. quality trade-off --> |
+| `plan_charts` | Google Gemini | `gemini-3.1-pro-preview` (default; `AGENT_LLM_MODEL` override) | Chart selection needs strong reasoning over the profile; one call, well within the 30s budget. Quality over latency. |
+| `write_summary` *(Phase 3)* | Google Gemini | `gemini-3.1-pro-preview` | Executive narrative quality matters. |
+| `suggest_followups` *(Phase 4)* | Google Gemini | `gemini-2.5-flash` | Short suggestions — latency-sensitive, cheaper model. |
 
-**Fallback behaviour:** <!-- Production resilience only: retry/backoff, degraded mode, or a surfaced error if the LLM API is unavailable or rate-limited. NOT a test/offline stub path — tests call the real API with keys from `.env`. -->
+Provider is resolved by `src/llm/client.py` auto-detect (Gemini key set → Gemini). **No Anthropic.**
 
-**Prompt strategy:** <!-- System/user split, few-shot examples, structured output (tool_use / JSON mode)? -->
+**Fallback behaviour:** production resilience only — `plan_charts` wraps the Gemini call in try/except with one retry/backoff. On persistent failure it sets `state["error"]`; `Assumed:` it then falls back to a deterministic default 3-chart plan (trend / top-N / distribution) so a pack still renders, logging the degradation. Tests call the real Gemini API with the key from `.env`.
+
+**Prompt strategy:** system prompt (`src/prompts/plan_charts.md`) defines the role, the whitelist of chart types, and the strict output contract. User message = the JSON `LLMProfile` (schema + aggregates only). Output is **structured JSON** (a `chart_plan` array); the node parses and validates it against the whitelist, dropping any invalid spec.
 
 ---
 
 ## Tools & Tool Calling
 
-<!-- FILL IN: Every tool the agent can call. -->
+This agent uses **no LLM-invoked tools** — the pipeline is fixed and the LLM emits a plan, not tool calls. The deterministic "tools" are internal Python functions the nodes call directly:
 
-| Tool name | Description | Inputs | Output | Side-effects |
-|-----------|-------------|--------|--------|--------------|
-| <!-- name --> | <!-- what it does --> | <!-- params --> | <!-- return type --> | <!-- DB write, API call, file write, etc. --> |
+| Function | Description | Inputs | Output | Side-effects |
+|----------|-------------|--------|--------|--------------|
+| `analysis.profiling.build_profile` | Aggregated profile for the LLM | DataFrame | `LLMProfile` | none |
+| `analysis.columns.detect_roles` | Assign column roles + assumption note | DataFrame, profile | `ColumnMapping` | none |
+| `analysis.figures.compute_chart` | Compute one chart's exact figures + Plotly fig | DataFrame, chart spec, mapping | Plotly figure dict | none |
+| `analysis.store.get_dataset` | Fetch session DataFrame | `dataset_id` | DataFrame | none |
 
-**Tool selection strategy:** <!-- How does the agent decide which tool to call? (LLM choice, rule-based routing, forced single tool) -->
-
-**Tool failure handling:** <!-- retry, fallback, abort — per tool or global policy? -->
+**Tool selection strategy:** none (fixed pipeline). **Tool failure handling:** each node try/excepts; a compute failure on one chart drops that chart and continues (partial), a fatal failure sets `state["error"]`.
 
 ---
 
 ## Agent State
 
-<!-- FILL IN: The full state type. Every field must be named, typed, and annotated with what populates it. -->
-
 ```python
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     # Identity
-    run_id: int                          # set at initialisation
+    run_id: str                          # set at initialisation (AnalysisRun.id)
+    dataset_id: str                      # set at initialisation; key into DatasetStore
 
-    # Input
-    # ...                                # fields populated from the trigger
+    # Input / loaded data
+    dataframe: object                    # pandas.DataFrame, loaded by load_dataset (in-process ref, never serialized to LLM/DB)
+    request_text: str | None             # None for auto-pack; set for Phase-2 NL requests
 
-    # Pipeline data (populated progressively by nodes)
-    # ...
+    # Pipeline data (populated progressively)
+    profile: dict                        # LLMProfile — aggregated, the ONLY data sent to the LLM (build_profile)
+    column_mapping: dict                 # {date, amount, category, counterparty} + assumption_note (detect_roles)
+    chart_plan: list                     # validated chart specs from Gemini (plan_charts)
+    usage: dict                          # {prompt_tokens, completion_tokens, estimated_cost_usd} (plan_charts)
 
     # Output
-    # ...                                # final result fields
+    charts: list                         # [{id, type, title, subtitle, figure, computed_summary, rationale}] (compute_figures)
+    status: str                          # "completed" | "failed" (finalize / handle_error)
 
     # Control
     error: str | None                    # set by any node on fatal failure
-    checkpoint: str | None              # last completed node (for resume)
+    elapsed_ms: int                      # set by finalize
 ```
 
 ---
 
 ## Nodes / Steps
 
-<!-- FILL IN: One section per node. For single-agent loops, describe each "step" or "tool call phase." -->
+### `load_dataset`
+**Reads:** `dataset_id`. **Writes:** `dataframe`, `error`.
+**LLM call:** no.
+**External calls:** DatasetStore (in-memory). On failure (dataset missing/expired) → set `error`.
+**Behaviour:** fetch the session DataFrame by `dataset_id`. If absent, fatal error (client must re-upload).
 
-### `node_[name]`
+### `profile`
+**Reads:** `dataframe`. **Writes:** `profile`.
+**LLM call:** no.
+**Behaviour:** vectorized pandas aggregation → `LLMProfile`: per-column name/dtype/cardinality/sample-non-PII descriptors, row count, candidate date range, amount summary stats, top-K category labels with aggregated totals. This is the only data that will reach the LLM.
 
-**Reads from state:** <!-- field names -->
+### `detect_columns`
+**Reads:** `dataframe`, `profile`. **Writes:** `column_mapping`.
+**LLM call:** no.
+**Behaviour:** deterministic heuristics assign roles — date (parseable-as-datetime majority or name match), amount (numeric, signed/name match), category (low-cardinality string), counterparty (higher-cardinality string / name match). Builds a human-readable assumption note. Best-guess, never interrogates.
 
-**Writes to state:** <!-- field names -->
+### `plan_charts` (auto-pack path)
+**Reads:** `profile`, `column_mapping`, `request_text`. **Writes:** `chart_plan`, `usage`, `error`.
+**LLM call:** **yes** — Gemini, system=`prompts/plan_charts.md`, user=`LLMProfile` JSON. Output: structured `chart_plan` JSON.
+**External calls:** Gemini — on failure: retry once, then fall back to default plan (logged) or set `error`.
+**Behaviour:** Gemini picks the most insightful charts (Phase 1: aim for the 3 arsenal-breadth charts) from the whitelist; node validates each spec (known type, referenced roles exist) and drops invalids. Captures token usage. Reached only when `request_text` is absent.
 
-**LLM call:** <!-- yes/no; if yes: prompt template summary, model used, output format -->
+### `plan_from_nl` (Phase-2 NL path)
+**Reads:** `profile`, `column_mapping`, `request_text`, `history`. **Writes:** `chart_plan`, `usage`, `declined`, `message`, `error`.
+**LLM call:** **yes** — Gemini, system=`prompts/plan_from_nl.md`, user = `{profile, column_roles, request, history}` JSON (aggregates + prior-request summaries ONLY — never raw rows).
+**External calls:** Gemini — retry once. Output is ONE chart spec `{ "chart": {…} }` OR `{ "declined": true }`.
+**Behaviour:** maps the plain-English request to EXACTLY ONE parameterized spec (`time_series` with `bucket`/`group_role`/`top_k`/`sign`; `top_n_breakdown` with `group_role`/`top_n`/`metric`/`sign`; `distribution` with `sign`). Every param is validated against the detected roles — invalid/absent roles are dropped or the spec is declined (never guessed). Unlike the auto path there is **NO default-plan fallback**: an unmappable request sets `declined=True` + a friendly `message` and produces no chart (the API returns HTTP 200 with `chart:null`). Only a genuine Gemini transport failure on both attempts sets `error`/`planning_failed` (HTTP 502). Captures token usage. `history` is a short session summary so follow-ups resolve.
 
-**External calls:**
+### `compute_figures`
+**Reads:** `dataframe`, `chart_plan`, `column_mapping`, `chart_id_prefix`, `chart_id_start`. **Writes:** `charts`.
+**LLM call:** no.
+**Behaviour:** for each valid spec, pandas computes exact figures over the **full** DataFrame and builds a Plotly figure with the IB house-style template PLUS the exact aggregated `table` it plotted (bucket-level rows + header labels — figure and table share the same arrays so they can never disagree). Ids are `{prefix}{start+offset}` — `c1..cn` for the auto-pack, `q1,q2,…` for asked charts (session-unique). A per-chart failure drops that chart (partial) and logs; the pack still returns. The runner registers each chart (spec + table) into the session `DatasetStore` so `GET /charts/{cid}/table` serves it for both auto-pack and asked charts.
 
-| System | Operation | On Failure |
-|--------|-----------|------------|
-| <!-- system --> | <!-- what it calls --> | <!-- fatal (set error) / partial (log + continue) / retry --> |
+### `finalize`
+**Reads:** all. **Writes:** `status`, `elapsed_ms`.
+**Behaviour:** persist `AnalysisRun` (mapping, plan, usage, status), set `status="completed"`, record elapsed.
 
-**Behaviour:** <!-- One paragraph. What decision or transformation does this node perform? -->
+### `handle_error`
+**Reads:** `error`, `run_id`. **Writes:** `status="failed"`.
+**Behaviour:** persist failed `AnalysisRun` with `error_message`, log with `run_id`, terminate.
 
 ---
 
 ## Graph / Flow Topology
 
-<!-- FILL IN: ASCII diagram of node flow. Show ALL conditional edges explicitly. -->
-
 ```
 START
   │
   ▼
-node_a ──(error)──► node_handle_error ──► END
+load_dataset ──(error)──► handle_error ──► END
   │
   ▼
-node_b ──(condition)──► node_c
-  │                         │
-  │                         ▼
-  └──────────────────► node_finalize
-                             │
-                             ▼
-                            END
+profile ──(error)──► handle_error
+  │
+  ▼
+detect_columns ──(route_request)──► handle_error (error)
+  │                    │
+  │ (request_text)     │ (no request_text)
+  ▼                    ▼
+plan_from_nl        plan_charts
+  │                    │
+  └──────► compute_figures ◄──────┘
+                 │
+                 ▼ (error)──► handle_error
+              finalize ──► END
 ```
 
-**Conditional edges:**
+**Conditional edges (as built in Phase 2):**
 
 | Source node | Condition | Target |
 |-------------|-----------|--------|
-| <!-- node --> | <!-- e.g. state["error"] is not None --> | <!-- target node --> |
+| `load_dataset` | `state.get("error")` | `handle_error` else `profile` |
+| `profile` | `state.get("error")` | `handle_error` else `detect_columns` |
+| `detect_columns` | `route_request`: error → `handle_error`; `request_text` set → `plan_from_nl`; else → `plan_charts` |
+| `plan_charts` | `state.get("error")` | `handle_error` else `compute_figures` |
+| `plan_from_nl` | `state.get("error")` | `handle_error` else `compute_figures` (a decline is NOT an error — it flows to compute with an empty plan → completed, `chart:null`) |
+| `compute_figures` | `state.get("error")` | `handle_error` else `finalize` |
+
+The Phase-2 `route_request` branch is implemented as a conditional edge out of `detect_columns` (both paths reuse the shared `profile` + `detect_columns`, then split between `plan_charts` and `plan_from_nl`). *Phase 3:* `write_summary` + `data_quality` run after `compute_figures`. *Phase 4:* `anomaly_scan` + `suggest_followups` after compute.
 
 ---
 
 ## Memory & Context
 
-<!-- FILL IN: How does the agent remember things across turns, steps, or runs? -->
-
 | Scope | Mechanism | What is stored |
 |-------|-----------|----------------|
-| **Within a run** | LangGraph state | All in-progress data |
-| **Across runs** | <!-- DB / vector store / none --> | <!-- e.g. past results, user prefs --> |
-| **Conversation** | <!-- message history / summary / none --> | <!-- if chat-style --> |
+| **Within a run** | LangGraph state | DataFrame ref, profile, mapping, plan, charts |
+| **Across runs** | SQLite `AnalysisRun` + in-memory DatasetStore | run metadata (persisted); parsed DataFrame (in-memory, session only) |
+| **Conversation** | *(Phase 2)* per-session message + chart history in the DatasetStore | prior NL requests + resulting charts, so follow-ups have context |
 
-**Context window management:** <!-- How is the prompt kept within limits? (summary, sliding window, RAG retrieval) -->
+**Context window management:** only the compact `LLMProfile` (aggregates + top-K) goes to Gemini — bounded regardless of dataset size. Phase 2 appends a short summarized history of prior requests, not full data.
 
 ---
 
 ## Human-in-the-Loop Checkpoints
 
-<!-- FILL IN: Where does execution pause for human input? Delete section if not applicable. -->
-
-| Checkpoint | What is shown to the user | Expected user action | Timeout / default |
-|------------|--------------------------|----------------------|-------------------|
-| <!-- name --> | <!-- what the agent surfaces --> | <!-- approve / edit / abort --> | <!-- timeout action --> |
+None. By design the agent never interrogates the user before charting — it makes a best guess and states an assumption note. (The between-phase human testing gate is a build-process gate, not a runtime checkpoint.)
 
 ---
 
 ## Error Handling & Recovery
 
-<!-- FILL IN: How the agent handles failures at each level. -->
+**Node-level:** each node try/excepts; fatal errors set `state["error"]` and route to `handle_error`. A per-chart compute failure is partial — drop the chart, continue.
 
-**Node-level:** <!-- Each node catches its own exceptions; fatal errors set state["error"] and route to handle_error node. -->
-
-**Graph-level (handle_error node):**
+**Graph-level (`handle_error`):**
 - Reads: `state.error`, `state.run_id`
-- Updates DB: run status → "failed", `error_message`, `completed_at`
-- Logs error with `run_id` context
-- Terminates graph
+- Updates DB: `AnalysisRun.status = "failed"`, `error_message`, `completed_at`
+- Logs error with `run_id` context; terminates.
 
-**Resume / retry strategy:** <!-- Can a failed run be resumed from its last checkpoint? How? -->
+**Resume / retry strategy:** no checkpointer (runs are short, <30s). Failed runs are re-triggered by re-calling analyze; the DataFrame remains in the store, so no re-upload is needed unless the store evicted it.
 
-**Partial failure:** <!-- If a non-critical step fails, does the agent degrade gracefully or abort? -->
+**Partial failure:** a Gemini failure degrades to a deterministic default plan (logged); a single chart's compute failure drops just that chart. The pack renders whatever succeeded.
 
 ---
 
 ## Observability
 
-<!-- FILL IN: What is logged, traced, and measured? -->
+Wired in Phase 1 — never deferred.
 
 | Signal | What | Where |
 |--------|------|-------|
-| **Trace** | One trace per run, one span per node | <!-- OpenTelemetry / LangSmith / stdout --> |
-| **LLM calls** | Prompt tokens, completion tokens, latency, model | <!-- LangSmith / structured log --> |
-| **Tool calls** | Tool name, inputs, success/error, latency | Structured log |
-| **Run outcome** | Status, total duration, error if any | DB + structured log |
+| **Request/response** | dataset_id, run_id, row_count, chart count, status | structlog JSON → stdout (`src/observability`) |
+| **LLM calls** | model, prompt_tokens, completion_tokens, latency_ms, estimated_cost_usd | structlog JSON + stored in `AnalysisRun.usage` |
+| **Per-node** | node name, elapsed_ms, error if any | structlog JSON |
+| **Run outcome** | status, total elapsed_ms, error | SQLite `AnalysisRun` + structlog |
+
+`Assumed:` LangSmith tracing is optional and off by default (no Anthropic/LangSmith key required); structured stdout logging is the required Phase-1 observability. If `LANGCHAIN_API_KEY` is present, tracing may be enabled via env — not required for the gate.
 
 ---
 
 ## Concurrency Model
 
-<!-- FILL IN: How concurrent agent runs are handled. -->
-
-- **Run isolation:** <!-- one-at-a-time (API returns 409) / queue / parallel with run_id scoping -->
-- **Parallel nodes within a run:** <!-- which nodes run in parallel and why -->
-- **Checkpointing:** <!-- none / SqliteSaver / PostgresSaver — required if human-in-the-loop or long-running -->
+- **Run isolation:** single-user, single worker. Analyses run one at a time per process; the in-memory store is process-local, so `reload=False` and a single uvicorn worker are required.
+- **Parallel nodes within a run:** none in Phase 1 (linear). *(Phase 3+ `write_summary`/`data_quality` may run as parallel siblings after compute if beneficial.)*
+- **Checkpointing:** none (short runs, no HITL).
 
 ---
 
-## Graph Assembly (`agent/graph.py`)
-
-<!-- FILL IN: Pseudocode showing how nodes and edges are wired. Must be ≤ 60 lines in the real file. -->
+## Graph Assembly (`src/graph/agent.py`)
 
 ```python
-graph = StateGraph(AgentState)
-
-graph.add_node("node_a", node_a)
-graph.add_node("node_b", node_b)
-graph.add_node("finalize", node_finalize)
-graph.add_node("handle_error", node_handle_error)
-
-graph.set_entry_point("node_a")
-
-graph.add_conditional_edges(
-    "node_a",
-    lambda s: "handle_error" if s.get("error") else "node_b",
+from langgraph.graph import StateGraph, END
+from graph.state import AgentState
+from graph.nodes import (
+    load_dataset, profile, detect_columns,
+    plan_charts, plan_from_nl, compute_figures, finalize, handle_error,
 )
+from graph.edges import guard, route_request  # guard(next); route_request branches by request_text
 
-graph.add_edge("node_b", "finalize")
-graph.add_edge("finalize", END)
-graph.add_edge("handle_error", END)
+def _build_graph():
+    g = StateGraph(AgentState)
+    for name, fn in [
+        ("load_dataset", load_dataset), ("profile", profile),
+        ("detect_columns", detect_columns), ("plan_charts", plan_charts),
+        ("plan_from_nl", plan_from_nl), ("compute_figures", compute_figures),
+        ("finalize", finalize), ("handle_error", handle_error),
+    ]:
+        g.add_node(name, fn)
 
-compiled_graph = graph.compile()
+    g.set_entry_point("load_dataset")
+    for src, nxt in [("load_dataset", "profile"), ("profile", "detect_columns")]:
+        g.add_conditional_edges(src, guard(nxt), {nxt: nxt, "handle_error": "handle_error"})
+
+    # Phase-2 branch: auto chart-pack vs NL request.
+    g.add_conditional_edges("detect_columns", route_request,
+                            {"plan_charts": "plan_charts", "plan_from_nl": "plan_from_nl",
+                             "handle_error": "handle_error"})
+    for src in ("plan_charts", "plan_from_nl"):
+        g.add_conditional_edges(src, guard("compute_figures"),
+                                {"compute_figures": "compute_figures", "handle_error": "handle_error"})
+    g.add_conditional_edges("compute_figures", guard("finalize"),
+                            {"finalize": "finalize", "handle_error": "handle_error"})
+
+    g.add_edge("finalize", END)
+    g.add_edge("handle_error", END)
+    return g.compile()
+
+agentic_ai = _build_graph()
 ```
+
+The NL path is entered via `run_ask(dataset_id, request_text)` (a sibling of
+`run_agent`) which seeds `request_text`, `history` (session summaries), and the asked
+chart-id prefix, then invokes the same compiled graph.

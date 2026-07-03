@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="")
     gemini_api_key: str = Field(default="")
 
+    # Optional token cost rates (USD per 1,000 tokens). When both are 0 (default),
+    # estimated_cost_usd is reported as null ("n/a").
+    llm_input_cost_per_1k: float = Field(default=0.0)
+    llm_output_cost_per_1k: float = Field(default=0.0)
+
 
 _settings: Settings | None = None
 

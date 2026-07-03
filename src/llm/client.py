@@ -31,5 +31,20 @@ class LLMClient:
     def __init__(self) -> None:
         self._provider = _make_provider()
 
+    @property
+    def model(self) -> str:
+        return getattr(self._provider, "model", "")
+
     def call_model(self, prompt: str, *, system: str | None = None) -> str:
         return self._provider.call_model(prompt, system=system)
+
+    def call_model_with_usage(
+        self, prompt: str, *, system: str | None = None, response_json: bool = False
+    ):
+        """Return an LLMResult (text + token counts). Falls back gracefully for
+        providers that only implement the plain `call_model` interface."""
+        fn = getattr(self._provider, "call_model_with_usage", None)
+        if fn is not None:
+            return fn(prompt, system=system, response_json=response_json)
+        from llm.providers.gemini import LLMResult
+        return LLMResult(text=self._provider.call_model(prompt, system=system))
